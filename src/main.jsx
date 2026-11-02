@@ -14,6 +14,7 @@ function App(){
  const [playBlocked,setPlayBlocked]=useState(false);
  const [local,setLocal]=useState(null),[remote,setRemote]=useState(null),[screen,setScreen]=useState(null),[remoteScreen,setRemoteScreen]=useState(null);
  const peer=useRef(null),localRef=useRef(null),screenRef=useRef(null),calls=useRef([]),other=useRef("");
+ const retryTimer=useRef(null),attempts=useRef(0),connectedRef=useRef(false);
  const localVideo=useRef(null),remoteVideo=useRef(null),screenVideo=useRef(null),remoteScreenVideo=useRef(null);
  useEffect(()=>{if(localVideo.current)localVideo.current.srcObject=local},[local]);
  useEffect(()=>{if(remoteVideo.current)remoteVideo.current.srcObject=remote},[remote]);
@@ -24,7 +25,8 @@ function App(){
  const link=()=>location.origin+location.pathname+"?room="+encodeURIComponent(room);
  function newRoom(){const id=crypto.randomUUID();setRoom(id);setHost(true);history.replaceState(null,"",location.pathname+"?room="+id+"&host=1");setStatus("Sala criada. Clique em Entrar na chamada.");}
  async function copy(){try{await navigator.clipboard.writeText(link());setStatus("Link copiado!")}catch{setStatus("Copie o endereço: "+link())}}
- function attachCall(call,kind){calls.current.push(call);call.on("stream",s=>{if(kind==="screen")setRemoteScreen(s);else setRemote(s);setConnected(true);setStatus("Conectado")});call.on("close",()=>{if(kind==="screen")setRemoteScreen(null);else setRemote(null)});call.on("error",e=>setStatus("Erro de transmissão: "+e.message))}
+ function attachCall(call,kind){calls.current.push(call);call.on("stream",s=>{if(kind==="screen")setRemoteScreen(s);else setRemote(s);connectedRef.current=true;clearTimeout(retryTimer.current);setConnected(true);setStatus("Conectado")});call.on("close",()=>{if(kind==="screen")setRemoteScreen(null);else setRemote(null)});call.on("error",e=>{if(kind==="camera"&&!connectedRef.current&&e.type==="peer-unavailable")scheduleRetry();else setStatus("Erro de transmissão: "+e.message)})}
+ function scheduleRetry(){if(!peer.current||connectedRef.current||attempts.current>=12)return;clearTimeout(retryTimer.current);setStatus("Aguardando o anfitrião entrar na sala... tentativa "+(attempts.current+1)+"/12");retryTimer.current=setTimeout(()=>{if(!peer.current||connectedRef.current)return;attempts.current++;dial(other.current,"camera",localRef.current)},2500)}
  function dial(id,kind,stream){if(!peer.current||!stream)return;const call=peer.current.call(id,stream,{metadata:{kind}});if(call)attachCall(call,kind)}
  async function join(){
  if(!room){setStatus("Crie uma sala primeiro.");return}
@@ -33,14 +35,14 @@ function App(){
   setStatus("Solicitando câmera e microfone...");
   if(!navigator.mediaDevices?.getUserMedia)throw new Error("Abra o site no Safari via HTTPS e permita câmera e microfone.");
   const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"user",width:{ideal:ios?640:1280},height:{ideal:ios?480:720}},audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
-  localRef.current=stream;setLocal(stream);
+  localRef.current=stream;setLocal(stream);attempts.current=0;connectedRef.current=false;
   const id="telalink-"+room+(host?"-host":"-guest");
   const counterpart="telalink-"+room+(host?"-guest":"-host");
   other.current=counterpart;
   const p=new Peer(id);peer.current=p;
   p.on("open",()=>{setStatus(host?"Sala aberta. Aguardando convidado...":"Conectando à sala...");if(!host){dial(counterpart,"camera",stream);}});
   p.on("call",call=>{const kind=call.metadata?.kind==="screen"?"screen":"camera";call.answer(localRef.current||new MediaStream());attachCall(call,kind);if(host&&kind==="camera")setTimeout(()=>dial(counterpart,"camera",localRef.current),250)});
-  p.on("error",e=>setStatus("Erro de conexão: "+e.message));
+  p.on("error",e=>{if(e.type==="peer-unavailable"&&!host&&!connectedRef.current)scheduleRetry();else if(e.type==="unavailable-id")setStatus("Esta sala já está aberta em outra aba. Feche a aba duplicada.");else setStatus("Erro de conexão: "+e.message)});
   p.on("disconnected",()=>setStatus("Sinalização desconectada. Verifique a rede."));
  }catch(e){setStatus("Não foi possível acessar câmera/microfone: "+e.message)}
  }
@@ -59,8 +61,8 @@ function App(){
  }catch(e){setStatus(e.name==="NotAllowedError"?"Compartilhamento cancelado.":"Erro ao compartilhar: "+e.message)}
  }
  function stopShare(){screenRef.current?.getTracks().forEach(t=>t.stop());screenRef.current=null;setScreen(null);calls.current.filter(c=>c.metadata?.kind==="screen").forEach(c=>c.close());}
- function leave(){stopShare();calls.current.forEach(c=>c.close());calls.current=[];peer.current?.destroy();peer.current=null;localRef.current?.getTracks().forEach(t=>t.stop());localRef.current=null;setLocal(null);setRemote(null);setRemoteScreen(null);setConnected(false);setStatus("Chamada encerrada.")}
- useEffect(()=>()=>{peer.current?.destroy();localRef.current?.getTracks().forEach(t=>t.stop());screenRef.current?.getTracks().forEach(t=>t.stop())},[]);
+ function leave(){clearTimeout(retryTimer.current);connectedRef.current=false;attempts.current=0;stopShare();calls.current.forEach(c=>c.close());calls.current=[];peer.current?.destroy();peer.current=null;localRef.current?.getTracks().forEach(t=>t.stop());localRef.current=null;setLocal(null);setRemote(null);setRemoteScreen(null);setConnected(false);setStatus("Chamada encerrada.")}
+ useEffect(()=>()=>{clearTimeout(retryTimer.current);peer.current?.destroy();localRef.current?.getTracks().forEach(t=>t.stop());screenRef.current?.getTracks().forEach(t=>t.stop())},[]);
  const big=remoteScreen||screen||remote||local;
  const fullScreen=()=>{const el=document.querySelector(".mainVideo");if(el?.webkitEnterFullscreen)el.webkitEnterFullscreen();else if(el?.requestFullscreen)el.requestFullscreen();else document.querySelector(".stage")?.requestFullscreen?.().catch(()=>setStatus("Tela cheia indisponível neste navegador."))};
  return <main><header><div className="brand"><span className="brandIcon">▣</span><div><strong>TelaLink</strong><small>CHAMADAS EM ALTA QUALIDADE</small></div></div><div className="live"><span className={connected?"dot on":"dot"}/>{connected?"Em chamada":peer.current?"Sala aberta":"Pronto"}</div></header>
